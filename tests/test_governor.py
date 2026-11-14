@@ -910,7 +910,7 @@ class TheExampleScript(GovernorTestCase):
                        "exit 1\n")
         env = {**os.environ, "MAX_POOL_STATE_DIR": self._tmp.name, "JOB": f"sh {job}"}
         proc = self._run(env)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
         for line in ("job 1: the job exited 1",
                      "job 1: limit notice found, flag raised",
                      "job 2: skipped: usage limit is flagged, so this job did not run"):
@@ -935,6 +935,27 @@ class TheExampleScript(GovernorTestCase):
         proc = self._run(env)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("*", proc.stdout.splitlines())
+
+    def test_a_failing_job_makes_the_script_exit_with_its_status_after_both_jobs(self):
+        """source: a scheduler only sees a failed job through the script's exit status."""
+        env = {**os.environ, "MAX_POOL_STATE_DIR": self._tmp.name, "JOB": "false"}
+        proc = self._run(env)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        lines = proc.stdout.splitlines()
+        self.assertIn("job 1: the job exited 1", lines)
+        self.assertIn("job 2: the job exited 1", lines)
+
+    def test_the_bare_demo_removes_its_temporary_state_directory(self):
+        """source: the demo makes a state directory and must not leave it behind."""
+        home = Path(self._tmp.name) / "home"
+        scratch = Path(self._tmp.name) / "scratch"
+        home.mkdir()
+        scratch.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("MAX_POOL_STATE_DIR", "JOB")}
+        env.update(HOME=str(home), TMPDIR=str(scratch))
+        proc = self._run(env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(list(scratch.iterdir()), [])
 
 
 if __name__ == "__main__":

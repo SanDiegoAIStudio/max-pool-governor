@@ -35,6 +35,14 @@ _SAVED_FLAG = gov.MAX_LIMIT_FLAG
 
 def setUpModule():
     global _SAVED_FLAG
+    assert_throwaway(gov.MAX_LIMIT_FLAG)
+    # The module may have been imported by another test module first, so the
+    # import-time path sits in that module's guard directory, not this one.
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    guarded = [p for p in gov.MAX_LIMIT_FLAG.resolve().parents
+               if p.parent == temp_root and p.name.startswith("governor-guard-")]
+    if not guarded:
+        raise RuntimeError("test flag is outside its temporary directory")
     _SAVED_FLAG = gov.MAX_LIMIT_FLAG
     gov.MAX_LIMIT_FLAG = Path(_GUARD_TMP.name) / gov.FLAG_FILENAME
     assert_throwaway(gov.MAX_LIMIT_FLAG)
@@ -78,6 +86,12 @@ class QuotaNoticesAreCaught(unittest.TestCase):
                 self.assertTrue(gov.looks_like_quota(notice),
                                 f"quota notice not recognised: {notice!r}")
 
+    def test_camelcase_rate_limit_names_match(self):
+        """source: real API error reasons write the words joined, with a capital R."""
+        for notice in ("userRateLimitExceeded", "apiRateLimitExceeded"):
+            with self.subTest(notice=notice):
+                self.assertTrue(gov.looks_like_quota(stderr=notice), notice)
+
     def test_noun_first_usage_limit_reached_matches(self):
         """source: noun-first "usage limit reached" must match.
 
@@ -113,6 +127,12 @@ class OrdinaryTextIsNotAQuota(unittest.TestCase):
         for text in ("rate_limit_error", "x-ratelimit-remaining: 0"):
             with self.subTest(text=text):
                 self.assertTrue(gov.looks_like_quota(stderr=text), text)
+
+    def test_an_all_capital_word_ending_in_rate_is_not_a_rate_limit(self):
+        """source: the camelCase branch must not accept a capital letter after a capital letter."""
+        for text in ("SEPARATE LIMIT", "ACCURATE LIMITS"):
+            with self.subTest(text=text):
+                self.assertFalse(gov.looks_like_quota(stderr=text), text)
 
     def test_a_long_review_discussing_a_rate_limit_is_kept(self):
         """source: a long document that mentions a rate limit must not match."""

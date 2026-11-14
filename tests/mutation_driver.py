@@ -390,7 +390,7 @@ MUTATIONS = [
 
     ("R1 a letter before rate is allowed to start a rate limit",
      "test_detect",
-     '    r"|(?<![a-z])rate.?limit"\n',
+     '    r"|(?:(?<![a-z])|(?<=(?-i:[a-z]))(?=(?-i:R)))rate.?limit"\n',
      '    r"|rate.?limit"  # MUTANT: no lookbehind\n',
      "OrdinaryTextIsNotAQuota.test_words_ending_in_rate_before_limit_are_not_quotas"),
 
@@ -446,7 +446,7 @@ MUTATIONS = [
 
     ("N3 the example script has no demo directory",
      "test_governor",
-     '  MAX_POOL_STATE_DIR=$(mktemp -d)\n  export MAX_POOL_STATE_DIR\n',
+     '  MAX_POOL_STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/max-pool-demo.XXXXXX")\n  export MAX_POOL_STATE_DIR\n',
      '  :  # MUTANT: the demo uses the home folder\n',
      "TheExampleScript.test_the_bare_demo_leaves_the_home_folder_alone",
      "examples/nightly.sh"),
@@ -457,6 +457,39 @@ MUTATIONS = [
      "set +f  # MUTANT\n",
      "TheExampleScript.test_a_job_word_that_looks_like_a_file_pattern_is_passed_as_is",
      "examples/nightly.sh"),
+
+    ("W1a the camelCase branch of the rate limit pattern is removed",
+     "test_detect",
+     r'r"|(?:(?<![a-z])|(?<=(?-i:[a-z]))(?=(?-i:R)))rate.?limit"',
+     r'r"|(?<![a-z])rate.?limit"',
+     "QuotaNoticesAreCaught.test_camelcase_rate_limit_names_match"),
+
+    ("W1b the camelCase lookbehind ignores case",
+     "test_detect",
+     r'(?<=(?-i:[a-z]))',
+     r'(?<=[a-z])',
+     "OrdinaryTextIsNotAQuota.test_an_all_capital_word_ending_in_rate_is_not_a_rate_limit"),
+
+    ("W2 the example script always exits 0",
+     "test_governor",
+     'done\nexit "$last_failure"\n',
+     'done\nexit 0  # MUTANT\n',
+     "TheExampleScript.test_a_failing_job_makes_the_script_exit_with_its_status_after_both_jobs",
+     "examples/nightly.sh"),
+
+    ("W3 the demo does not remove its temporary directory",
+     "test_governor",
+     "  trap 'rm -rf \"$MAX_POOL_STATE_DIR\"' EXIT\n",
+     "",
+     "TheExampleScript.test_the_bare_demo_removes_its_temporary_state_directory",
+     "examples/nightly.sh"),
+
+    ("W4 the import-time flag path is outside the guarded root",
+     "test_detect",
+     'os.environ["MAX_POOL_STATE_DIR"] = _GUARD_TMP.name',
+     'os.environ["MAX_POOL_STATE_DIR"] = tempfile.TemporaryDirectory(prefix="governor-other-").name',
+     "OrdinaryTextIsNotAQuota.test_ids_containing_402_or_429_are_not_quotas",
+     "tests/test_detect.py"),
 ]
 
 # Mutations that can fail a test only on an older Python: label -> first Python

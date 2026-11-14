@@ -231,5 +231,6 @@ class OddInputNeverRaises(ResetTimeCase):
             got = gov.reset_time("resets 3am")
         self.assertEqual(got, datetime(2026, 5, 10, 3, 0, tzinfo=LA))
 
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

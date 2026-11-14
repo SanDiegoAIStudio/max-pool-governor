@@ -31,7 +31,7 @@ MAX_LIMIT_FLAG = _state_dir() / FLAG_FILENAME
 LIMIT_PAT = re.compile(
     r"(?:hit|reached|exceeded)\s+your\s+.{0,24}?(?:limit|quota)"
     r"|usage\s+limit"
-    r"|(?<![a-z])rate.?limit"
+    r"|(?:(?<![a-z])|(?<=(?-i:[a-z]))(?=(?-i:R)))rate.?limit"
     r"|\blimit\s+reached\b"
     r"|quota\s+(?:exceeded|exhausted)"
     r"|\bout\s+of\s+(?:credits|tokens|quota)\b"
