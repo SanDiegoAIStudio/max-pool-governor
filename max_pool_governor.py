@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import sys
@@ -30,7 +31,7 @@ MAX_LIMIT_FLAG = _state_dir() / FLAG_FILENAME
 LIMIT_PAT = re.compile(
     r"(?:hit|reached|exceeded)\s+your\s+.{0,24}?(?:limit|quota)"
     r"|usage\s+limit"
-    r"|rate.?limit"
+    r"|(?<![a-z])rate.?limit"
     r"|\blimit\s+reached\b"
     r"|quota\s+(?:exceeded|exhausted)"
     r"|\bout\s+of\s+(?:credits|tokens|quota)\b"
@@ -218,6 +219,23 @@ def reset_time(text, now: datetime | None = None) -> datetime | None:
         return None
 
 
+_NAME = re.compile(r"[^\s()]+")
+
+
+def valid_name(name) -> bool:
+    """True when name is a non-empty str the flag file can hold and read back.
+
+    A name may not contain whitespace or a parenthesis, and must encode to UTF-8.
+    """
+    if not isinstance(name, str) or not name:
+        return False
+    try:
+        name.encode("utf-8")
+    except UnicodeError:
+        return False
+    return _NAME.fullmatch(name) is not None
+
+
 def flag_quota(source: str, models, scope: str = "account",
                until: datetime | None = None) -> None:
     """Record that `models` are at their limit, attributed to `source`.
@@ -229,7 +247,9 @@ def flag_quota(source: str, models, scope: str = "account",
     """
     if isinstance(models, str):
         models = [models]
-    models = [m for m in dict.fromkeys(models) if m]
+    if not valid_name(source):
+        return
+    models = [m for m in dict.fromkeys(models) if valid_name(m)]
     if not models:
         return
     keys = []
@@ -239,6 +259,7 @@ def flag_quota(source: str, models, scope: str = "account",
             keys.append(f"pool:{pool_of(model)}")
     keys = list(dict.fromkeys(keys))
     lock_fh = None
+    tmp = None
     try:
         MAX_LIMIT_FLAG.parent.mkdir(parents=True, exist_ok=True)
         lock_fh = open(MAX_LIMIT_FLAG.with_name(MAX_LIMIT_FLAG.name + ".lock"), "w")
@@ -267,7 +288,11 @@ def flag_quota(source: str, models, scope: str = "account",
         tmp.write_text("\n".join(merged) + "\n", encoding="utf-8")
         tmp.replace(MAX_LIMIT_FLAG)
     except OSError:
-        pass
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
     finally:
         if lock_fh is not None:
             try:
@@ -403,6 +428,9 @@ def _cli(argv: list[str]) -> int:
         except (IndexError, ValueError):
             print("--window wants a number of hours", file=sys.stderr)
             return 2
+        if not math.isfinite(window):
+            print("--window wants a number of hours", file=sys.stderr)
+            return 2
         rest = rest[:i] + rest[i + 2:]
     scope = None
     if "--scope" in rest:
@@ -417,7 +445,10 @@ def _cli(argv: list[str]) -> int:
         if len(rest) < 2:
             print("detect wants <source> <model>, with the text on stdin", file=sys.stderr)
             return 2
-        text = sys.stdin.read()
+        if not all(valid_name(n) for n in rest[:2]):
+            print("names may not contain spaces or parentheses", file=sys.stderr)
+            return 2
+        text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
         # Piped text is a log, so match it as the error channel. The length
         # guard is for model output and would drop a notice inside a long log.
         if not looks_like_quota(stderr=text):
@@ -444,6 +475,9 @@ def _cli(argv: list[str]) -> int:
             rest = rest[:i] + rest[i + 2:]
         if len(rest) < 2:
             print("flag wants <source> <model>...", file=sys.stderr)
+            return 2
+        if not all(valid_name(n) for n in rest):
+            print("names may not contain spaces or parentheses", file=sys.stderr)
             return 2
         flag_quota(rest[0], rest[1:], scope=scope or "account", until=until)
         return 0
@@ -482,5 +516,14 @@ def _cli(argv: list[str]) -> int:
     return 2
 
 
+def main(argv=None) -> int:
+    """Run the command line. Any unexpected error exits 2, never 1 (1 means "no limit")."""
+    try:
+        return _cli(sys.argv[1:] if argv is None else argv)
+    except Exception as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    sys.exit(_cli(sys.argv[1:]))
+    sys.exit(main())

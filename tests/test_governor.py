@@ -6,6 +6,7 @@ source: a test must not touch the real state directory.
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import os
 import subprocess
@@ -120,8 +121,27 @@ class WritesDoNotErodeEachOther(GovernorTestCase):
 
     def test_flag_quota_never_raises_on_an_unwritable_path(self):
         """source: an unwritable flag path does not raise."""
-        gov.MAX_LIMIT_FLAG = Path("/nonexistent-root-dir-xyz/state/limit.flag")
+        blocker = Path(self._tmp.name) / "blocker"
+        blocker.write_text("a regular file, so nothing can be created below it")
+        gov.MAX_LIMIT_FLAG = blocker / "state" / "limit.flag"
         gov.flag_quota("writer-a", "plan-east")  # must not raise
+        self.assertTrue(blocker.is_file())
+
+    def test_flag_quota_skips_names_it_cannot_write(self):
+        """source: a name with a space, a newline or an unencodable character is dropped."""
+        gov.flag_quota("my job", "plan-east")
+        self.assertFalse(gov.MAX_LIMIT_FLAG.exists())
+        gov.flag_quota("job", ["plan-east\nfake 2026-01-01T00:00:00 x (y)",
+                               "plan-\udc80", "plan-west"])
+        self.assertEqual(gov.quota_flagged(), {"plan-west", "pool:plan"})
+        self.assertEqual(len(self.read_raw().strip().splitlines()), 2)
+
+    def test_a_failed_replace_leaves_no_temporary_file(self):
+        """source: a failed replace removes its temporary file and still does not raise."""
+        with mock.patch.object(gov.Path, "replace", side_effect=OSError("disk")):
+            gov.flag_quota("writer-a", "plan-east")
+        leftovers = [p.name for p in Path(self._tmp.name).iterdir() if ".tmp." in p.name]
+        self.assertEqual(leftovers, [])
 
     def test_empty_or_blank_models_write_nothing(self):
         """source: an empty model list does not create the flag file."""
@@ -142,6 +162,8 @@ class ConcurrentWritersAllSurvive(GovernorTestCase):
             sys.path.insert(0, {str(repo)!r})
             import max_pool_governor as gov
             gov.MAX_LIMIT_FLAG = Path({str(gov.MAX_LIMIT_FLAG)!r})
+            if len(sys.argv) > 3:
+                print("ready", flush=True)
             gov.flag_quota(sys.argv[1], sys.argv[2])
         """))
         return worker
@@ -152,13 +174,21 @@ class ConcurrentWritersAllSurvive(GovernorTestCase):
         gov.MAX_LIMIT_FLAG.parent.mkdir(parents=True, exist_ok=True)
         with open(gov.MAX_LIMIT_FLAG.with_name(gov.MAX_LIMIT_FLAG.name + ".lock"), "w") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
-            proc = subprocess.Popen([sys.executable, str(worker), "job", "model-blocked"])
+            proc = subprocess.Popen(
+                [sys.executable, str(worker), "job", "model-blocked", "say-ready"],
+                stdout=subprocess.PIPE, text=True)
             try:
+                self.assertEqual(proc.stdout.readline().strip(), "ready")
                 with self.assertRaises(subprocess.TimeoutExpired):
-                    proc.wait(timeout=3)
+                    proc.wait(timeout=2)
+                fcntl.flock(held, fcntl.LOCK_UN)
+                self.assertEqual(proc.wait(timeout=30), 0)
             finally:
-                proc.kill()
-                proc.wait(timeout=10)
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=10)
+                proc.stdout.close()
+        self.assertIn("model-blocked", gov.quota_flagged())
 
     def test_six_concurrent_processes_all_land(self):
         """source: six processes writing at once all leave a line."""
@@ -403,6 +433,46 @@ class TheCliIsTheInterfaceForNonPythonCallers(GovernorTestCase):
             [sys.executable, str(self.MODULE), *argv],
             input=stdin, capture_output=True, text=True, timeout=60, env=env)
 
+    def test_detect_reads_job_output_that_is_not_utf8(self):
+        """source: bytes that are not UTF-8 are replaced, so binary output cannot stop detect."""
+        env = {**os.environ, "MAX_POOL_STATE_DIR": str(self._tmp.name)}
+        proc = subprocess.run(
+            [sys.executable, str(self.MODULE), "detect", "scheduled-job", "plan-east"],
+            input=b"\xff\xfe binary\nusage limit reached\n",
+            capture_output=True, timeout=60, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("plan-east", gov.quota_flagged())
+
+    def test_a_window_that_is_not_finite_exits_2(self):
+        """source: --window nan or inf is refused, so a check cannot silently answer 1."""
+        for value in ("nan", "inf"):
+            with self.subTest(value=value):
+                proc = self._cli("check", "plan-east", "--window", value)
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn("--window wants a number of hours", proc.stderr)
+
+    def test_an_unexpected_error_exits_2_not_1(self):
+        """source: exit 1 means "no limit", so a crash must not exit 1."""
+        with mock.patch.object(gov, "is_quota_flagged", side_effect=RuntimeError("boom")), \
+                mock.patch.object(sys, "stderr", new_callable=io.StringIO) as err:
+            code = gov.main(["check", "plan-east"])
+        self.assertEqual(code, 2)
+        self.assertIn("error: RuntimeError: boom", err.getvalue())
+
+    def test_flag_refuses_a_name_with_a_space_or_parenthesis(self):
+        """source: such a name writes a line the reader cannot parse, so it is refused."""
+        cases = (
+            (("flag", "my job", "plan-east"), ""),
+            (("flag", "job", "plan)east"), ""),
+            (("detect", "job", "plan east"), "usage limit reached"),
+        )
+        for argv, stdin in cases:
+            with self.subTest(argv=argv):
+                proc = self._cli(*argv, stdin=stdin)
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn("names may not contain spaces or parentheses", proc.stderr)
+                self.assertFalse(gov.MAX_LIMIT_FLAG.exists())
+
     def test_detect_flags_a_real_notice_and_exits_zero(self):
         """source: detect exits 0 and records the model when stdin is a notice."""
         proc = self._cli("detect", "scheduled-job", "plan-east",
@@ -427,7 +497,7 @@ class TheCliIsTheInterfaceForNonPythonCallers(GovernorTestCase):
         """source: flagging a pool name blocks models on that pool."""
         self._cli("flag", "scheduled-job", "pool:plan")
         self.assertTrue(gov.is_quota_flagged("plan-east"))
-        self.assertNotIn("pool", gov.quota_flagged() - {"pool:plan"})
+        self.assertEqual(gov.quota_flagged(), {"pool:plan"})
 
     def test_check_exit_codes_are_the_contract(self):
         """source: check exits 0 when the model is flagged and 1 when it is not."""
@@ -822,6 +892,49 @@ class TheCliRulesTheReadmeStates(GovernorTestCase):
         self.assertEqual(self._cli("flag", "nightly", "plan-east", "--until", text).returncode, 0)
         payload = json.loads(self._cli("status").stdout)
         self.assertEqual(datetime.fromisoformat(payload["until"]["plan-east"]), moment)
+
+
+class TheExampleScript(GovernorTestCase):
+    """source: the example script is the one place a stranger sees the whole flow."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def _run(self, env):
+        return subprocess.run(["sh", "examples/nightly.sh"], cwd=self.ROOT, env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_a_job_that_prints_the_notice_on_stderr_and_exits_1_is_flagged(self):
+        """source: the case the script exists for is a job that fails with the notice on stderr."""
+        job = Path(self._tmp.name) / "job.sh"
+        job.write_text("echo \"You've hit your usage limit. Your limit will reset at 3am.\" >&2\n"
+                       "exit 1\n")
+        env = {**os.environ, "MAX_POOL_STATE_DIR": self._tmp.name, "JOB": f"sh {job}"}
+        proc = self._run(env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for line in ("job 1: the job exited 1",
+                     "job 1: limit notice found, flag raised",
+                     "job 2: skipped: usage limit is flagged, so this job did not run"):
+            self.assertIn(line, proc.stdout.splitlines())
+
+    def test_the_bare_demo_leaves_the_home_folder_alone(self):
+        """source: with no JOB and no state directory the demo must not write into HOME."""
+        home = Path(self._tmp.name) / "home"
+        scratch = Path(self._tmp.name) / "scratch"
+        home.mkdir()
+        scratch.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("MAX_POOL_STATE_DIR", "JOB")}
+        env.update(HOME=str(home), TMPDIR=str(scratch))
+        proc = self._run(env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("job 1: limit notice found, flag raised", proc.stdout.splitlines())
+        self.assertFalse((home / ".max-pool-governor").exists())
+
+    def test_a_job_word_that_looks_like_a_file_pattern_is_passed_as_is(self):
+        """source: JOB is split on spaces and never expanded as a file pattern."""
+        env = {**os.environ, "MAX_POOL_STATE_DIR": self._tmp.name, "JOB": "echo *"}
+        proc = self._run(env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("*", proc.stdout.splitlines())
 
 
 if __name__ == "__main__":

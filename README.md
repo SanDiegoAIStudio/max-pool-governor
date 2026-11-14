@@ -38,15 +38,15 @@ job 2: skipped: usage limit is flagged, so this job did not run
 
 The shell reported exit code 0. The run was at 15:16 on 2026-11-13 in a machine zone that is 8 hours behind UTC. The first job printed the sample notice, detect read "3am" from it, and the flag line got `until=2026-11-14T03:00:00-08:00`. The second job did not run. On your machine the date and the offset will follow your clock and your zone. The job runs again once the clock passes that time.
 
-Set JOB to the command you want to guard. The script splits JOB on spaces. The default is `cat examples/limit-notice.txt`. POOL is the name stored in the flag. The default is `pool:default`. SOURCE is the name recorded next to that line. The default is `nightly`.
+Set JOB to the command you want to guard. The script splits JOB on spaces and never expands a file pattern in it. It reads what the job prints on stdout and on stderr, and a job that exits with an error still has its output read and gets a line saying so. The default is `cat examples/limit-notice.txt`. POOL is the name stored in the flag. The default is `pool:default`. SOURCE is the name recorded next to that line. The default is `nightly`. When neither JOB nor MAX_POOL_STATE_DIR is set, the script uses a new temporary state directory and says so on stderr, so the demo never writes a flag into your home folder.
 
 ## Commands
 
 Run `python3 max_pool_governor.py` or `python3 max_pool_governor.py -h`. Both exit 0 and print the subcommand names: detect, flag, check, fresh, status, clear.
 
-`detect SOURCE MODEL` reads the job output on stdin. `--scope model` or `--scope account` is optional. With no `--scope`, detect calls `quota_scope` on the text. That returns `model` when the notice says to switch models or matches the model-scoped pattern in the module, and `account` otherwise. Exit 0 when the text is a limit notice: it reads the reset time from the text, writes the flag, and prints `flagged MODEL (scope)` when no reset time was read or `flagged MODEL (scope) until ISO` when one was. Exit 1 when the text is not a notice, and it writes nothing. Exit 2 when the source or model is missing, when `--scope` is not `model` or `account`, or when `--window` is not a number of hours.
+`detect SOURCE MODEL` reads the job output on stdin. Bytes that are not UTF-8 are replaced, so binary output cannot stop it. `--scope model` or `--scope account` is optional. With no `--scope`, detect calls `quota_scope` on the text. That returns `model` when the notice says to switch models or matches the model-scoped pattern in the module, and `account` otherwise. Exit 0 when the text is a limit notice: it reads the reset time from the text, writes the flag, and prints `flagged MODEL (scope)` when no reset time was read or `flagged MODEL (scope) until ISO` when one was. Exit 1 when the text is not a notice, and it writes nothing. Exit 2 when the source or model is missing or contains a space or a parenthesis, when `--scope` is not `model` or `account`, or when `--window` is not a number of hours.
 
-`flag SOURCE MODEL [MODEL ...]` records those names. The default scope is account. `--scope model` records only the names you passed. `--until ISO` states the reset time yourself, for example `flag nightly plan-east --until 2026-01-31T03:00`. The value is read with `datetime.fromisoformat`, and a value with no zone is local time. A trailing `Z` is read as UTC. Exit 0 when the arguments are valid. Exit 2 when the source or a model is missing, or when `--scope` is not `model` or `account`. Exit 2 with `--until wants an ISO time such as 2026-01-31T03:00` on stderr when the value is missing or does not parse. Exit 2 with `--until must be in the future` on stderr when the time is not later than now. After an exit 2 nothing is written.
+`flag SOURCE MODEL [MODEL ...]` records those names. The default scope is account. `--scope model` records only the names you passed. `--until ISO` states the reset time yourself, for example `flag nightly plan-east --until 2026-01-31T03:00`. The value is read with `datetime.fromisoformat`, and a value with no zone is local time. A trailing `Z` is read as UTC. Exit 0 when the arguments are valid. Exit 2 when the source or a model is missing or contains a space or a parenthesis, or when `--scope` is not `model` or `account`. Exit 2 with `--until wants an ISO time such as 2026-01-31T03:00` on stderr when the value is missing or does not parse. Exit 2 with `--until must be in the future` on stderr when the time is not later than now. After an exit 2 nothing is written.
 
 `check MODEL` exits 0 when that model is unavailable and 1 when it is available. Exit 2 when the model is missing or `--window` is not a number. `--window HOURS` replaces the default window for this call.
 
@@ -56,9 +56,9 @@ Run `python3 max_pool_governor.py` or `python3 max_pool_governor.py -h`. Both ex
 
 `clear MODEL [MODEL ...]` removes the lines for those names and the pool line of each, so `clear plan-east` also removes `pool:plan`, and exits 0. Exit 2 when no model is given.
 
-An unknown subcommand exits 2 and names the subcommand on stderr.
+An unknown subcommand exits 2 and names the subcommand on stderr. Any other error exits 2 with `error:` and a description on stderr, so a crash is never read as exit 1.
 
-`--window`, `--scope` and `--until` may sit among the other arguments. The default window is `QUOTA_WINDOW_POOL_H`, which is 24 hours.
+`--window`, `--scope` and `--until` may sit among the other arguments. `--window` must be a finite number of hours. The default window is `QUOTA_WINDOW_POOL_H`, which is 24 hours.
 
 ## How it works
 

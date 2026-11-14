@@ -3,10 +3,18 @@
 # Run this from the repository root.
 # JOB is the command to guard. The default prints a sample notice and needs no account.
 set -eu
+# JOB is split on spaces and never expanded as a file pattern.
+set -f
 
 if [ ! -f max_pool_governor.py ]; then
   echo "could not find max_pool_governor.py; run this from the repository root" >&2
   exit 1
+fi
+
+if [ -z "${JOB:-}" ] && [ -z "${MAX_POOL_STATE_DIR:-}" ]; then
+  MAX_POOL_STATE_DIR=$(mktemp -d)
+  export MAX_POOL_STATE_DIR
+  echo "demo: no JOB and no MAX_POOL_STATE_DIR, so the flag goes to a new temporary directory" >&2
 fi
 
 JOB=${JOB:-cat examples/limit-notice.txt}
@@ -28,8 +36,14 @@ for label in "job 1" "job 2"; do
   fi
   echo "$label: running"
   # JOB is one command line. The default needs no quotes and no account.
-  output=$($JOB)
+  set +e
+  output=$($JOB 2>&1)
+  job_status=$?
+  set -e
   printf '%s\n' "$output"
+  if [ "$job_status" -ne 0 ]; then
+    echo "$label: the job exited $job_status"
+  fi
   set +e
   printf '%s\n' "$output" | python3 max_pool_governor.py detect "$SOURCE" "$POOL"
   detected=$?

@@ -30,11 +30,21 @@ def assert_throwaway(path: Path) -> None:
         raise RuntimeError("refusing to touch the real state directory")
 
 
+_SAVED_FLAG = gov.MAX_LIMIT_FLAG
+
+
 def setUpModule():
+    global _SAVED_FLAG
+    _SAVED_FLAG = gov.MAX_LIMIT_FLAG
+    gov.MAX_LIMIT_FLAG = Path(_GUARD_TMP.name) / gov.FLAG_FILENAME
     assert_throwaway(gov.MAX_LIMIT_FLAG)
     root = Path(_GUARD_TMP.name).resolve()
     if root not in gov.MAX_LIMIT_FLAG.resolve().parents:
         raise RuntimeError("detector tests are not inside a temporary directory")
+
+
+def tearDownModule():
+    gov.MAX_LIMIT_FLAG = _SAVED_FLAG
 
 
 # Shapes taken from notices the detector is meant to match. No account detail.
@@ -92,6 +102,17 @@ class OrdinaryTextIsNotAQuota(unittest.TestCase):
             with self.subTest(text=text[:50]):
                 self.assertFalse(gov.looks_like_quota(text),
                                  f"ordinary text misread as a quota: {text!r}")
+
+    def test_words_ending_in_rate_before_limit_are_not_quotas(self):
+        """source: a letter right before "rate" means a longer word, not a rate limit."""
+        for text in ("accurate limits on the input size",
+                     "generate limit checks for the batch",
+                     "a moderate limit of 40 files"):
+            with self.subTest(text=text):
+                self.assertFalse(gov.looks_like_quota(stderr=text), text)
+        for text in ("rate_limit_error", "x-ratelimit-remaining: 0"):
+            with self.subTest(text=text):
+                self.assertTrue(gov.looks_like_quota(stderr=text), text)
 
     def test_a_long_review_discussing_a_rate_limit_is_kept(self):
         """source: a long document that mentions a rate limit must not match."""

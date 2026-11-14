@@ -16,7 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# (label, test module, old, new, selector)
+# (label, test module, old, new, selector[, file relative to the repository root])
+# Without the sixth element the file is max_pool_governor.py.
 MUTATIONS = [
     ("M1 narrow pattern misses noun-first wording",
      "test_detect",
@@ -72,7 +73,11 @@ MUTATIONS = [
      '        tmp.write_text("\\n".join(merged) + "\\n", encoding="utf-8")\n'
      '        tmp.replace(MAX_LIMIT_FLAG)\n'
      '    except OSError:\n'
-     '        pass\n'
+     '        if tmp is not None:\n'
+     '            try:\n'
+     '                tmp.unlink(missing_ok=True)\n'
+     '            except OSError:\n'
+     '                pass\n'
      '    finally:\n'
      '        if lock_fh is not None:\n'
      '            try:\n'
@@ -85,7 +90,11 @@ MUTATIONS = [
      '        MAX_LIMIT_FLAG.write_text(  # MUTANT: truncating, erases other writers\n'
      '            f"{stamp} {source} ({models[-1]})\\n", encoding="utf-8")\n'
      '    except OSError:\n'
-     '        pass\n'
+     '        if tmp is not None:\n'
+     '            try:\n'
+     '                tmp.unlink(missing_ok=True)\n'
+     '            except OSError:\n'
+     '                pass\n'
      '    finally:\n'
      '        if lock_fh is not None:\n'
      '            try:\n'
@@ -172,7 +181,7 @@ MUTATIONS = [
 
     ("G15 detect ignores stdin and always reports a quota",
      "test_governor",
-     '        text = sys.stdin.read()\n',
+     '        text = sys.stdin.buffer.read().decode("utf-8", errors="replace")\n',
      '        text = "usage limit reached"  # MUTANT: ignores stdin\n',
      "TheCliIsTheInterfaceForNonPythonCallers.test_detect_exits_nonzero_on_an_ordinary_log"),
 
@@ -378,6 +387,76 @@ MUTATIONS = [
      '    if text[-1:] in ("Z", "z"):\n',
      '    if False:  # MUTANT: Z branch off\n',
      "TheCliRulesTheReadmeStates.test_flag_until_reads_a_trailing_z"),
+
+    ("R1 a letter before rate is allowed to start a rate limit",
+     "test_detect",
+     '    r"|(?<![a-z])rate.?limit"\n',
+     '    r"|rate.?limit"  # MUTANT: no lookbehind\n',
+     "OrdinaryTextIsNotAQuota.test_words_ending_in_rate_before_limit_are_not_quotas"),
+
+    ("R2 detect reads stdin as text again",
+     "test_governor",
+     '        text = sys.stdin.buffer.read().decode("utf-8", errors="replace")\n',
+     '        text = sys.stdin.read()  # MUTANT\n',
+     "TheCliIsTheInterfaceForNonPythonCallers.test_detect_reads_job_output_that_is_not_utf8"),
+
+    ("R3 the finiteness check on --window is removed",
+     "test_governor",
+     '        if not math.isfinite(window):\n',
+     '        if False:  # MUTANT: nan and inf pass\n',
+     "TheCliIsTheInterfaceForNonPythonCallers.test_a_window_that_is_not_finite_exits_2"),
+
+    ("R4 main has no try",
+     "test_governor",
+     '    except Exception as exc:\n',
+     '    except ZeroDivisionError as exc:  # MUTANT: a crash escapes\n',
+     "TheCliIsTheInterfaceForNonPythonCallers.test_an_unexpected_error_exits_2_not_1"),
+
+    ("R5a the CLI name check is removed",
+     "test_governor",
+     '        if not all(valid_name(n) for n in rest):\n',
+     '        if False:  # MUTANT: no name check in flag\n',
+     "TheCliIsTheInterfaceForNonPythonCallers.test_flag_refuses_a_name_with_a_space_or_parenthesis"),
+
+    ("R5b flag_quota does not filter names",
+     "test_governor",
+     '    models = [m for m in dict.fromkeys(models) if valid_name(m)]\n',
+     '    models = [m for m in dict.fromkeys(models) if m]  # MUTANT\n',
+     "WritesDoNotErodeEachOther.test_flag_quota_skips_names_it_cannot_write"),
+
+    ("R6 a failed replace leaves its temporary file",
+     "test_governor",
+     '                tmp.unlink(missing_ok=True)\n',
+     '                pass  # MUTANT: temporary file kept\n',
+     "WritesDoNotErodeEachOther.test_a_failed_replace_leaves_no_temporary_file"),
+
+    ("N1 the example script drops stderr from the job output",
+     "test_governor",
+     "  output=$($JOB 2>&1)\n",
+     "  output=$($JOB)  # MUTANT\n",
+     "TheExampleScript.test_a_job_that_prints_the_notice_on_stderr_and_exits_1_is_flagged",
+     "examples/nightly.sh"),
+
+    ("N2 the example script stops when the job fails",
+     "test_governor",
+     "  set +e\n  output=$($JOB 2>&1)\n",
+     "  output=$($JOB 2>&1)\n",
+     "TheExampleScript.test_a_job_that_prints_the_notice_on_stderr_and_exits_1_is_flagged",
+     "examples/nightly.sh"),
+
+    ("N3 the example script has no demo directory",
+     "test_governor",
+     '  MAX_POOL_STATE_DIR=$(mktemp -d)\n  export MAX_POOL_STATE_DIR\n',
+     '  :  # MUTANT: the demo uses the home folder\n',
+     "TheExampleScript.test_the_bare_demo_leaves_the_home_folder_alone",
+     "examples/nightly.sh"),
+
+    ("N4 the example script expands file patterns",
+     "test_governor",
+     "set -f\n",
+     "set +f  # MUTANT\n",
+     "TheExampleScript.test_a_job_word_that_looks_like_a_file_pattern_is_passed_as_is",
+     "examples/nightly.sh"),
 ]
 
 # Mutations that can fail a test only on an older Python: label -> first Python
@@ -388,20 +467,23 @@ ONLY_BELOW = {"H13 a trailing Z is not read": (3, 11)}
 def run_selector(work: Path, test_module: str, selector: str) -> int:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", f"{test_module}.{selector}"],
-        cwd=work / "tests",
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "unittest", f"{test_module}.{selector}"],
+            cwd=work / "tests",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     return proc.returncode
 
 
 def main() -> int:
     failed = 0
-    for label, test_module, old, new, selector in MUTATIONS:
+    for label, test_module, old, new, selector, *target in MUTATIONS:
         if sys.version_info >= ONLY_BELOW.get(label, (99,)):
             print(f"not applicable on this Python {label}")
             continue
@@ -411,13 +493,19 @@ def main() -> int:
             shutil.copy2(ROOT / "max_pool_governor.py", work / "max_pool_governor.py")
             for name in ("test_detect.py", "test_governor.py", "test_reset_time.py"):
                 shutil.copy2(ROOT / "tests" / name, work / "tests" / name)
+            shutil.copytree(ROOT / "examples", work / "examples")
 
-            if run_selector(work, test_module, selector) != 0:
+            baseline = run_selector(work, test_module, selector)
+            if baseline is None:
+                print(f"timeout {label}")
+                failed += 1
+                continue
+            if baseline != 0:
                 print(f"survived {label}")
                 failed += 1
                 continue
 
-            src_path = work / "max_pool_governor.py"
+            src_path = work / (target[0] if target else "max_pool_governor.py")
             src = src_path.read_text()
             if old not in src:
                 print(f"survived {label}")
@@ -425,7 +513,11 @@ def main() -> int:
                 continue
             src_path.write_text(src.replace(old, new, 1))
 
-            if run_selector(work, test_module, selector) != 0:
+            result = run_selector(work, test_module, selector)
+            if result is None:
+                print(f"timeout {label}")
+                failed += 1
+            elif result != 0:
                 print(f"killed {label}")
             else:
                 print(f"survived {label}")

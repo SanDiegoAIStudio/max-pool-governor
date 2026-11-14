@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -95,25 +96,25 @@ class TheClockShape(ResetTimeCase):
         """source: "resets 3am" read at 01:00 gives 03:00 the same day."""
         now = datetime(2026, 5, 10, 1, 0, tzinfo=LA)
         got = gov.reset_time("5-hour limit reached / resets 3am", now)
-        self.assertEqual(got.replace(tzinfo=None), datetime(2026, 5, 10, 3, 0))
+        self.assertEqual(got, datetime(2026, 5, 10, 3, 0, tzinfo=LA))
 
     def test_after_three_am_gives_tomorrow_at_three_am(self):
         """source: "resets 3am" read at 05:00 gives 03:00 the next day."""
         now = datetime(2026, 5, 10, 5, 0, tzinfo=LA)
         got = gov.reset_time("Your limit will reset at 3am.", now)
-        self.assertEqual(got.replace(tzinfo=None), datetime(2026, 5, 11, 3, 0))
+        self.assertEqual(got, datetime(2026, 5, 11, 3, 0, tzinfo=LA))
 
     def test_the_moment_itself_is_not_later_than_now(self):
         """source: the result is strictly after now, so exactly 3am gives tomorrow."""
         now = datetime(2026, 5, 10, 3, 0, tzinfo=LA)
         got = gov.reset_time("resets 3am", now)
-        self.assertEqual(got.replace(tzinfo=None), datetime(2026, 5, 11, 3, 0))
+        self.assertEqual(got, datetime(2026, 5, 11, 3, 0, tzinfo=LA))
 
     def test_minutes_are_read(self):
         """source: "resets 3:30pm" is 15:30."""
         now = datetime(2026, 5, 10, 1, 0, tzinfo=LA)
         got = gov.reset_time("resets 3:30pm", now)
-        self.assertEqual(got.replace(tzinfo=None), datetime(2026, 5, 10, 15, 30))
+        self.assertEqual(got, datetime(2026, 5, 10, 15, 30, tzinfo=LA))
 
     def test_pm_is_afternoon_and_case_does_not_matter(self):
         """source: pm adds twelve hours, in either case."""
@@ -126,8 +127,8 @@ class TheClockShape(ResetTimeCase):
         now = datetime(2026, 5, 10, 5, 0, tzinfo=LA)
         midnight = gov.reset_time("resets 12am", now)
         noon = gov.reset_time("resets 12pm", now)
-        self.assertEqual(midnight.replace(tzinfo=None), datetime(2026, 5, 11, 0, 0))
-        self.assertEqual(noon.replace(tzinfo=None), datetime(2026, 5, 10, 12, 0))
+        self.assertEqual(midnight, datetime(2026, 5, 11, 0, 0, tzinfo=LA))
+        self.assertEqual(noon, datetime(2026, 5, 10, 12, 0, tzinfo=LA))
 
     def test_an_hour_of_zero_or_thirteen_gives_none(self):
         """source: the hour must be 1 to 12."""
@@ -222,15 +223,13 @@ class OddInputNeverRaises(ResetTimeCase):
         """source: the reader finds the shape inside a long log."""
         now = datetime(2026, 5, 10, 1, 0, tzinfo=LA)
         got = gov.reset_time(("noise\n" * 100_000) + "resets 3am", now)
-        self.assertEqual(got.replace(tzinfo=None), datetime(2026, 5, 10, 3, 0))
+        self.assertEqual(got, datetime(2026, 5, 10, 3, 0, tzinfo=LA))
 
     def test_the_default_now_is_the_module_clock(self):
         """source: with no now the module's _now is used."""
-        got = gov.reset_time("resets 3am")
-        self.assertIsNotNone(got)
-        self.assertGreater(got, datetime.now(UTC))
-        self.assertLessEqual(got, datetime.now(UTC) + timedelta(days=1, minutes=1))
-
+        with mock.patch.object(gov, "_now", return_value=datetime(2026, 5, 10, 1, 0, tzinfo=LA)):
+            got = gov.reset_time("resets 3am")
+        self.assertEqual(got, datetime(2026, 5, 10, 3, 0, tzinfo=LA))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
